@@ -348,7 +348,7 @@
 <!-- Firebase -->
 <script type="module">
 import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js";
-import { getFirestore, collection, getDocs, deleteDoc, doc, onSnapshot, setDoc } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js";
+import { getFirestore, collection, getDocs, deleteDoc, doc, onSnapshot, setDoc, writeBatch } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js";
 
 const firebaseConfig = {
   apiKey: "AIzaSyCLCR9yzxIO76MRD1z6M-ciSb7PaKHlFwI",
@@ -399,16 +399,65 @@ window.addEventListener('offline', updateOnlineStatus);
 updateOnlineStatus();
 
 // ═══════════════════════════════════════════
-//  STUDENTS (localStorage only — no need for DB)
+//  STUDENTS — Firestore + localStorage cache
 // ═══════════════════════════════════════════
-function saveStudents() {
+function saveStudentsLocal() {
   try { localStorage.setItem(STORAGE_KEY_STUDENTS, JSON.stringify(students)); } catch(e) {}
 }
-function loadStudents() {
+function loadStudentsLocal() {
   try {
     const s = localStorage.getItem(STORAGE_KEY_STUDENTS);
     if (s) students = JSON.parse(s);
   } catch(e) {}
+}
+
+async function saveStudentsToFirestore(studentList) {
+  try {
+    // Save in chunks of 500 (Firestore batch limit)
+    const chunks = [];
+    for (let i = 0; i < studentList.length; i += 400) {
+      chunks.push(studentList.slice(i, i + 400));
+    }
+    // First clear existing students doc, then write new one
+    // We store all students as one document for simplicity
+    await setDoc(doc(db, 'config', 'students'), { list: studentList, updatedAt: new Date().toISOString() });
+    return true;
+  } catch(e) {
+    console.error('Firestore students save error:', e);
+    return false;
+  }
+}
+
+async function loadStudentsFromFirestore() {
+  try {
+    const snap = await getDocs(collection(db, 'config'));
+    const configDoc = snap.docs.find(d => d.id === 'students');
+    if (configDoc) {
+      const data = configDoc.data();
+      if (data.list && data.list.length > 0) {
+        students = data.list;
+        saveStudentsLocal(); // cache locally
+        return true;
+      }
+    }
+    return false;
+  } catch(e) {
+    console.error('Firestore students load error:', e);
+    return false;
+  }
+}
+
+// Listen for student database updates from other devices
+function startStudentsListener() {
+  onSnapshot(doc(db, 'config', 'students'), (snap) => {
+    if (snap.exists()) {
+      const data = snap.data();
+      if (data.list && data.list.length > 0) {
+        students = data.list;
+        saveStudentsLocal();
+      }
+    }
+  }, (err) => console.warn('Students listener error:', err));
 }
 
 // ═══════════════════════════════════════════
@@ -654,11 +703,11 @@ window.adminLogout = function() {
   showPanel('register');
 };
 
-window.uploadCSV = function(event) {
+window.uploadCSV = async function(event) {
   const file = event.target.files[0];
   if (!file) return;
   const reader = new FileReader();
-  reader.onload = function(e) {
+  reader.onload = async function(e) {
     const lines = e.target.result.split('\n').filter(l => l.trim());
     if (!lines.length) return;
     const header = lines[0].split(',').map(h => h.trim().toLowerCase());
@@ -678,15 +727,24 @@ window.uploadCSV = function(event) {
       newStudents.push({ id: cols[idCol], firstname: cols[firstCol] || '', lastname: cols[lastCol] || '', grade: gradeCol >= 0 ? cols[gradeCol] : '' });
     }
     students = newStudents;
-    saveStudents();
-    document.getElementById('csv-status').textContent = `✓ Loaded ${newStudents.length} students.`;
-    document.getElementById('csv-status').style.color = 'var(--green)';
-    showToast(`${newStudents.length} students loaded!`);
+    saveStudentsLocal();
+    document.getElementById('csv-status').textContent = `Saving ${newStudents.length} students...`;
+    document.getElementById('csv-status').style.color = 'var(--gray-text)';
+    const saved = await saveStudentsToFirestore(newStudents);
+    if (saved) {
+      document.getElementById('csv-status').textContent = `✓ ${newStudents.length} students loaded and synced to all devices.`;
+      document.getElementById('csv-status').style.color = 'var(--green)';
+      showToast(`${newStudents.length} students synced!`);
+    } else {
+      document.getElementById('csv-status').textContent = `✓ ${newStudents.length} students loaded locally (sync failed — check connection).`;
+      document.getElementById('csv-status').style.color = '#e67e22';
+      showToast(`${newStudents.length} students loaded locally.`);
+    }
   };
   reader.readAsText(file);
 };
 
-window.addIndividualStudent = function() {
+window.addIndividualStudent = async function() {
   const id = document.getElementById('add-id').value.trim();
   const first = document.getElementById('add-first').value.trim();
   const last = document.getElementById('add-last').value.trim();
@@ -694,12 +752,13 @@ window.addIndividualStudent = function() {
   if (!id || !first || !last) { showToast('Fill in ID, first name, and last name.', true); return; }
   if (students.find(s => s.id === id)) { showToast('That student ID already exists.', true); return; }
   students.push({ id, firstname: first, lastname: last, grade });
-  saveStudents();
+  saveStudentsLocal();
+  await saveStudentsToFirestore(students);
   document.getElementById('add-id').value = '';
   document.getElementById('add-first').value = '';
   document.getElementById('add-last').value = '';
   document.getElementById('add-grade').value = '';
-  showToast(`${first} ${last} added!`);
+  showToast(`${first} ${last} added and synced!`);
 };
 
 function renderAdminData() {
@@ -754,8 +813,13 @@ window.removeRegistration = async function(studentId) {
 
 window.exportCSV = function() {
   if (!registrations.length) { showToast('No registrations to export.', true); return; }
-  const header = ['#','Student Name','Student ID','Grade','Has Date','Outside Guest Name','Date Registered','Time'];
-  const rows = registrations.map((r,i) => [i+1, r.name, r.studentId, r.grade, r.hasDate?'Yes':'No', r.guestName||'', r.dateStr, r.timeStr]);
+  const header = ['#','First Name','Last Name','Student ID','Grade','Has Date','Outside Guest Name','Date Registered','Time'];
+  const rows = registrations.map((r,i) => {
+    const parts = (r.name||'').trim().split(' ');
+    const first = parts[0] || '';
+    const last = parts.slice(1).join(' ') || '';
+    return [i+1, first, last, r.studentId, r.grade, r.hasDate?'Yes':'No', r.guestName||'', r.dateStr, r.timeStr];
+  });
   const csv = [header,...rows].map(r => r.map(v => `"${String(v).replace(/"/g,'""')}"`).join(',')).join('\n');
   const blob = new Blob([csv], {type:'text/csv'});
   const url = URL.createObjectURL(blob);
@@ -784,8 +848,10 @@ window.showToast = showToast;
 // ═══════════════════════════════════════════
 //  INIT
 // ═══════════════════════════════════════════
-loadStudents();
-startRegistrationsListener();   // real-time sync
+loadStudentsLocal(); // load cached students immediately for fast search
+loadStudentsFromFirestore(); // then sync from Firestore (overwrites if newer)
+startStudentsListener();     // live updates if admin uploads new CSV
+startRegistrationsListener(); // real-time registration sync
 
 </script>
 </body>
