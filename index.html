@@ -348,7 +348,7 @@
 <!-- Firebase -->
 <script type="module">
 import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js";
-import { getFirestore, collection, addDoc, getDocs, deleteDoc, doc, onSnapshot, setDoc, query, orderBy, enableIndexedDbPersistence } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js";
+import { getFirestore, collection, getDocs, deleteDoc, doc, onSnapshot, setDoc } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js";
 
 const firebaseConfig = {
   apiKey: "AIzaSyCLCR9yzxIO76MRD1z6M-ciSb7PaKHlFwI",
@@ -362,10 +362,7 @@ const firebaseConfig = {
 const app = initializeApp(firebaseConfig);
 const db = getFirestore(app);
 
-// Enable offline persistence
-enableIndexedDbPersistence(db).catch(err => {
-  console.warn('Offline persistence unavailable:', err.code);
-});
+
 
 // ═══════════════════════════════════════════
 //  STATE
@@ -430,9 +427,9 @@ async function saveRegistration(entry) {
 
 async function loadRegistrationsFromDB() {
   try {
-    const q = query(collection(db, 'registrations'), orderBy('timestamp'));
-    const snap = await getDocs(q);
+    const snap = await getDocs(collection(db, 'registrations'));
     registrations = snap.docs.map(d => d.data());
+    registrations.sort((a,b) => (a.timestamp||'').localeCompare(b.timestamp||''));
     return true;
   } catch(e) {
     console.error('Firestore load error:', e);
@@ -452,9 +449,9 @@ async function deleteRegistrationFromDB(studentId) {
 
 // Live listener for registrations (updates search results in real time)
 function startRegistrationsListener() {
-  const q = query(collection(db, 'registrations'), orderBy('timestamp'));
-  onSnapshot(q, (snap) => {
+  const unsubscribe = onSnapshot(collection(db, 'registrations'), (snap) => {
     registrations = snap.docs.map(d => d.data());
+    registrations.sort((a,b) => (a.timestamp||'').localeCompare(b.timestamp||''));
     // If admin panel is open, refresh it
     if (document.getElementById('panel-admin').classList.contains('active')) {
       renderAdminData();
